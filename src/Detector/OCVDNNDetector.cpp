@@ -140,6 +140,7 @@ bool OCVDNNDetector::Init(const config_t& config)
         dictNetType["YOLOV8"] = ModelType::YOLOV8;
         dictNetType["YOLOV8Mask"] = ModelType::YOLOV8Mask;
         dictNetType["YOLOV9"] = ModelType::YOLOV9;
+        dictNetType["YOLOV10"] = ModelType::YOLOV10;
 
         auto netType = dictNetType.find(net_type->second);
         if (netType != dictNetType.end())
@@ -346,7 +347,7 @@ void OCVDNNDetector::DetectInCrop(const cv::UMat& colorFrame, const cv::Rect& cr
     }
 	else
 	{
-        if (m_netType == ModelType::YOLOV8 || m_netType == ModelType::YOLOV5 || m_netType == ModelType::YOLOV9)
+        if (m_netType == ModelType::YOLOV8 || m_netType == ModelType::YOLOV5 || m_netType == ModelType::YOLOV9 || m_netType == ModelType::YOLOV10)
         {
             int rows = detections[0].size[1];
             int dimensions = detections[0].size[2];
@@ -394,7 +395,7 @@ void OCVDNNDetector::DetectInCrop(const cv::UMat& colorFrame, const cv::Rect& cr
                             tmpRegions.emplace_back(cv::Rect(left + crop.x, top + crop.y, width, height), T2T(class_id.x), static_cast<float>(maxClassScore));
                     }
                 }
-                else // yolov5
+                else if (m_netType == ModelType::YOLOV5)
                 {
                     float confidence = data[4];
 
@@ -423,6 +424,21 @@ void OCVDNNDetector::DetectInCrop(const cv::UMat& colorFrame, const cv::Rect& cr
                             if (m_classesWhiteList.empty() || m_classesWhiteList.find(T2T(class_id.x)) != std::end(m_classesWhiteList))
                                 tmpRegions.emplace_back(cv::Rect(left + crop.x, top + crop.y, width, height), T2T(class_id.x), static_cast<float>(maxClassScore));
                         }
+                    }
+                }
+                else if (m_netType == ModelType::YOLOV10)
+                {
+                    int left = cvRound(x_factor * data[0]);
+                    int top = cvRound(y_factor * data[1]);
+                    int width = cvRound(x_factor * (data[2] - data[0]));
+                    int height = cvRound(y_factor * (data[3] - data[1]));
+                    float confidence = data[4];
+                    int classId = cvRound(data[5]);
+                    
+                    if (confidence >= m_confidenceThreshold)
+                    {
+                        if (m_classesWhiteList.empty() || m_classesWhiteList.find(T2T(classId)) != std::end(m_classesWhiteList))
+                            tmpRegions.emplace_back(cv::Rect(left + crop.x, top + crop.y, width, height), T2T(classId), confidence);
                     }
                 }
 
