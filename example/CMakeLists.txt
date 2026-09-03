@@ -20,36 +20,23 @@ endif(BUILD_CARS_COUNTING)
 # добавляем include директории
 # ----------------------------------------------------------------------------
 INCLUDE_DIRECTORIES(${PROJECT_SOURCE_DIR}/../src
-                    ${PROJECT_SOURCE_DIR}/../src/common
+                    ${PROJECT_SOURCE_DIR}/../src/mtracking
                     ${PROJECT_SOURCE_DIR}/../src/Detector
                     ${PROJECT_SOURCE_DIR}/../src/Detector/vibe_src
                     ${PROJECT_SOURCE_DIR}/../src/Detector/Subsense
                     ${PROJECT_SOURCE_DIR}/../src/Tracker
                     ${PROJECT_SOURCE_DIR}/../src/Tracker/HungarianAlg
-                    ${PROJECT_SOURCE_DIR}/../thirdparty)
+                    ${PROJECT_SOURCE_DIR}/../thirdparty
+                    ${PROJECT_SOURCE_DIR}/../thirdparty/spdlog/include)
 
 set(LIBS ${OpenCV_LIBS}
          mtracking
          mdetection
          inih)
 
-if (BUILD_YOLO_LIB)
-    if (MSVC)
-      if("${CMAKE_SIZEOF_VOID_P}" STREQUAL "4")
-          set(BIT_SYSTEM x32)
-      else()
-          set(BIT_SYSTEM x64)
-      endif()
-
-      link_directories(${PROJECT_SOURCE_DIR}/../src/Detector/darknet/3rdparty/lib/${BIT_SYSTEM})
-    endif(MSVC)
-
-    add_definitions(-DBUILD_YOLO_LIB)
-endif(BUILD_YOLO_LIB)
-
-if (BUILD_YOLO_TENSORRT)
-    add_definitions(-DBUILD_YOLO_TENSORRT)
-endif(BUILD_YOLO_TENSORRT)
+if (BUILD_ONNX_TENSORRT)
+    add_definitions(-DBUILD_ONNX_TENSORRT)
+endif(BUILD_ONNX_TENSORRT)
 
 if (BUILD_CARS_COUNTING)
     add_definitions(-DBUILD_CARS_COUNTING)

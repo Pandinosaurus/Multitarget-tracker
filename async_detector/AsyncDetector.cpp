@@ -1,49 +1,14 @@
 #include "AsyncDetector.h"
 
 ///
-/// \brief DrawFilledRect
-///
-void DrawFilledRect(cv::Mat& frame, const cv::Rect& rect, cv::Scalar cl, int alpha)
-{
-	if (alpha)
-	{
-		const int alpha_1 = 255 - alpha;
-		const int nchans = frame.channels();
-		int color[3] = { cv::saturate_cast<int>(cl[0]), cv::saturate_cast<int>(cl[1]), cv::saturate_cast<int>(cl[2]) };
-		for (int y = rect.y; y < rect.y + rect.height; ++y)
-		{
-			uchar* ptr = frame.ptr(y) + nchans * rect.x;
-			for (int x = rect.x; x < rect.x + rect.width; ++x)
-			{
-				for (int i = 0; i < nchans; ++i)
-				{
-					ptr[i] = cv::saturate_cast<uchar>((alpha_1 * ptr[i] + alpha * color[i]) / 255);
-				}
-				ptr += nchans;
-			}
-		}
-	}
-	else
-	{
-		cv::rectangle(frame, rect, cl, cv::FILLED);
-	}
-}
-
-///
 /// \brief AsyncDetector::AsyncDetector
 /// \param parser
 ///
 AsyncDetector::AsyncDetector(const cv::CommandLineParser& parser)
-    :
-      m_showLogs(true),
-      m_fps(25),
-      m_startFrame(0),
-      m_endFrame(0),
-      m_finishDelay(0)
 {
     m_inFile = parser.get<std::string>(0);
     m_outFile = parser.get<std::string>("out");
-    m_showLogs = parser.get<int>("show_logs") != 0;
+    m_showLogsLevel = parser.get<std::string>("show_logs");
     m_startFrame = parser.get<int>("start_frame");
     m_endFrame = parser.get<int>("end_frame");
     m_finishDelay = parser.get<int>("end_delay");
@@ -57,6 +22,33 @@ AsyncDetector::AsyncDetector(const cv::CommandLineParser& parser)
     m_colors.emplace_back(255, 127, 255);
     m_colors.emplace_back(127, 0, 255);
     m_colors.emplace_back(127, 0, 127);
+
+    // Create loggers
+    m_consoleSink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
+    m_consoleSink->set_level(spdlog::level::from_str(m_showLogsLevel));
+    m_consoleSink->set_pattern("[%^%l%$] %v");
+
+    auto currentTime = std::chrono::system_clock::now();
+    auto transformed = currentTime.time_since_epoch().count() / 1000000;
+    std::time_t tt = std::chrono::system_clock::to_time_t(currentTime);
+    char buffer[80];
+#ifdef WIN32
+    tm timeInfo;
+    localtime_s(&timeInfo, &tt);
+    strftime(buffer, 80, "%G%m%d_%H%M%S", &timeInfo);
+#else
+    auto timeInfo = localtime(&tt);
+    strftime(buffer, 80, "%G%m%d_%H%M%S", timeInfo);
+#endif
+
+    size_t max_size = 1024 * 1024 * 5;
+    size_t max_files = 3;
+    m_fileSink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>("logs/" + std::string(buffer) + std::to_string(transformed % 1000) + ".txt", max_size, max_files);
+    m_fileSink->set_level(spdlog::level::from_str(m_showLogsLevel));
+
+    m_logger = std::shared_ptr<spdlog::logger>(new spdlog::logger("traffic", { m_consoleSink, m_fileSink }));
+    m_logger->set_level(spdlog::level::from_str(m_showLogsLevel));
+    m_logger->info("Start service");
 }
 
 ///
@@ -69,7 +61,7 @@ void AsyncDetector::Process()
 
     bool stopFlag = false;
 
-    std::thread thCapture(CaptureThread, m_inFile, m_startFrame, &m_fps, &m_framesQue, &stopFlag);
+    std::thread thCapture(CaptureThread, m_inFile, m_startFrame, &m_framesCount, &m_fps, &m_framesQue, &stopFlag);
 
 #ifndef SILENT_WORK
     cv::namedWindow("Video", cv::WINDOW_NORMAL | cv::WINDOW_KEEPRATIO);
@@ -121,19 +113,19 @@ void AsyncDetector::Process()
         ++framesCounter;
         if (m_endFrame && framesCounter > m_endFrame)
         {
-            std::cout << "Process: riched last " << m_endFrame << " frame" << std::endl;
+            m_logger->info("Process: riched last {} frame", m_endFrame);
             break;
         }
     }
 
-    std::cout << "Stopping threads..." << std::endl;
+    m_logger->info("Stopping threads...");
     stopFlag = true;
     m_framesQue.SetBreak(true);
 
     if (thCapture.joinable())
         thCapture.join();
 
-    std::cout << "work time = " << (allTime / freq) << std::endl;
+    m_logger->info("work time = {}", allTime / freq);
 #ifndef SILENT_WORK
 	cv::waitKey(m_finishDelay);
 #endif
@@ -198,14 +190,11 @@ void AsyncDetector::DrawTrack(cv::Mat frame,
 ///
 void AsyncDetector::DrawData(frame_ptr frameInfo, int framesCounter, int currTime)
 {
-    if (m_showLogs)
-    {
-		std::cout << "Frame " << framesCounter << ": ";
-        int id = frameInfo->m_inDetector.load();
-        if (id != FrameInfo::StateNotProcessed && id != FrameInfo::StateSkipped)
-            std::cout << "(" << id << ") detects = " << frameInfo->m_regions.size() << ", ";
-		std::cout << "tracks = " << frameInfo->m_tracks.size() << ", time = " << currTime << std::endl;
-    }
+    int id = frameInfo->m_inDetector.load();
+    if (id != FrameInfo::StateNotProcessed && id != FrameInfo::StateSkipped)
+        m_logger->info("Frame {0} ({1}): ({2}) detects= {3}, tracks = {4}, time = {5}", framesCounter, m_framesCount, id, frameInfo->m_regions.size(), frameInfo->m_tracks.size(), currTime);
+    else
+        m_logger->info("Frame {0} ({1}): tracks = {2}, time = {3}", framesCounter, m_framesCount, frameInfo->m_tracks.size(), currTime);
 
     for (const auto& track : frameInfo->m_tracks)
     {
@@ -261,7 +250,7 @@ void AsyncDetector::DrawData(frame_ptr frameInfo, int framesCounter, int currTim
 /// \param framesQue
 /// \param stopFlag
 ///
-void AsyncDetector::CaptureThread(std::string fileName, int startFrame, float* fps, FramesQueue* framesQue, bool* stopFlag)
+void AsyncDetector::CaptureThread(std::string fileName, int startFrame, int* framesCount, float* fps, FramesQueue* framesQue, bool* stopFlag)
 {
     cv::VideoCapture capture;
     if (fileName.size() == 1)
@@ -275,7 +264,10 @@ void AsyncDetector::CaptureThread(std::string fileName, int startFrame, float* f
         std::cerr << "Can't open " << fileName << std::endl;
         return;
     }
+    *framesCount = cvRound(capture.get(cv::CAP_PROP_FRAME_COUNT));
     capture.set(cv::CAP_PROP_POS_FRAMES, startFrame);
+
+    time_point_t startTimeStamp = std::chrono::system_clock::now();
 
     *fps = std::max(1.f, (float)capture.get(cv::CAP_PROP_FPS));
 	int frameHeight = cvRound(capture.get(cv::CAP_PROP_FRAME_HEIGHT));
@@ -328,13 +320,13 @@ void AsyncDetector::CaptureThread(std::string fileName, int startFrame, float* f
     {
         trackerSettings.m_minStaticTime = minStaticTime;
         trackerSettings.m_maxStaticTime = 60;
-        trackerSettings.m_maximumAllowedSkippedFrames = cvRound(trackerSettings.m_minStaticTime * (*fps)); // Maximum allowed skipped frames
-        trackerSettings.m_maxTraceLength = 2 * trackerSettings.m_maximumAllowedSkippedFrames;        // Maximum trace length
+        trackerSettings.m_maximumAllowedLostTime = trackerSettings.m_minStaticTime;      // Maximum allowed lost time
+        trackerSettings.m_maxTraceLength = 2 * trackerSettings.m_maximumAllowedLostTime; // Maximum trace length
     }
     else
     {
-        trackerSettings.m_maximumAllowedSkippedFrames = cvRound(2 * (*fps)); // Maximum allowed skipped frames
-        trackerSettings.m_maxTraceLength = cvRound(4 * (*fps));              // Maximum trace length
+        trackerSettings.m_maximumAllowedLostTime = 2.; // Maximum allowed lost time
+        trackerSettings.m_maxTraceLength = 4.;         // Maximum trace length
     }
 
     // Capture the first frame
@@ -344,13 +336,14 @@ void AsyncDetector::CaptureThread(std::string fileName, int startFrame, float* f
 	++frameInd;
 
     std::thread thDetection(DetectThread, detectorConfig, firstFrame, framesQue, stopFlag);
-    std::thread thTracking(TrackingThread, trackerSettings, framesQue, stopFlag);
+    std::thread thTracking(TrackingThread, trackerSettings, framesQue, *fps, stopFlag);
 
     // Capture frame
     for (; !(*stopFlag);)
     {
         frame_ptr frameInfo(new FrameInfo(frameInd));
         frameInfo->m_dt = cv::getTickCount();
+        frameInfo->m_frameTimeStamp = startTimeStamp + std::chrono::milliseconds(cvRound(frameInd * (1000.f / (*fps))));
         capture >> frameInfo->m_frame;
         if (frameInfo->m_frame.empty())
         {
@@ -391,7 +384,7 @@ void AsyncDetector::CaptureThread(std::string fileName, int startFrame, float* f
 void AsyncDetector::DetectThread(const config_t& config, cv::Mat firstFrame, FramesQueue* framesQue, bool* stopFlag)
 {
 	cv::UMat ufirst = firstFrame.getUMat(cv::ACCESS_READ);
-    std::unique_ptr<BaseDetector> detector = BaseDetector::CreateDetector(tracking::Detectors::Yolo_Darknet, config, ufirst);
+    std::unique_ptr<BaseDetector> detector = BaseDetector::CreateDetector(tracking::Detectors::ONNX_TensorRT, config, ufirst);
 
     for (; !(*stopFlag);)
     {
@@ -413,16 +406,16 @@ void AsyncDetector::DetectThread(const config_t& config, cv::Mat firstFrame, Fra
 /// \brief AsyncDetector::TrackingThread
 /// \param
 ///
-void AsyncDetector::TrackingThread(const TrackerSettings& settings, FramesQueue* framesQue, bool* stopFlag)
+void AsyncDetector::TrackingThread(const TrackerSettings& settings, FramesQueue* framesQue, float fps, bool* stopFlag)
 {
-    std::unique_ptr<BaseTracker> tracker = BaseTracker::CreateTracker(settings);
+    std::unique_ptr<BaseTracker> tracker = BaseTracker::CreateTracker(settings, fps);
 
     for (; !(*stopFlag);)
     {
         frame_ptr frameInfo = framesQue->GetFirstDetectedFrame();
         if (frameInfo)
         {
-            tracker->Update(frameInfo->m_regions, frameInfo->m_clFrame, frameInfo->m_fps);
+            tracker->Update(frameInfo->m_regions, frameInfo->m_clFrame, frameInfo->m_frameTimeStamp);
 
             tracker->GetTracks(frameInfo->m_tracks);
             frameInfo->m_inTracker.store(FrameInfo::StateCompleted);

@@ -17,13 +17,15 @@ class MotionDetectorExample final : public VideoExample
 {
 public:
     MotionDetectorExample(const cv::CommandLineParser& parser)
-        : VideoExample(parser), m_minObjWidth(10)
+        : VideoExample(parser)
     {
 #ifdef USE_CLIP
 		std::string clipModel = "C:/work/clip/ruclip_/CLIP/data/ruclip-vit-large-patch14-336";
 		std::string bpeModel = "C:/work/clip/ruclip_/CLIP/data/ruclip-vit-large-patch14-336/bpe.model";
 		m_clip.Init(clipModel, bpeModel, 336, 0, { "pedestrian", "person", "suv", "pickup", "car", "truck", "bus" });
 #endif // USE_CLIP
+
+		m_logger->info("MotionDetectorExample");
 	}
 
 protected:
@@ -34,7 +36,9 @@ protected:
     ///
     bool InitDetector(cv::UMat frame) override
     {
-        m_minObjWidth = frame.cols / 20;
+		m_logger->info("MotionDetectorExample::InitDetector");
+
+		m_minObjWidth = 2;
 
         config_t config;
 		config.emplace("useRotatedRect", "0");
@@ -51,7 +55,7 @@ protected:
 			config.emplace("updateFactor", "16");
 			break;
 		case tracking::Detectors::Motion_MOG:
-            config.emplace("history", std::to_string(cvRound(50 * m_fps)));
+            config.emplace("history", std::to_string(cvRound(5000 * m_fps)));
 			config.emplace("nmixtures", "3");
 			config.emplace("backgroundRatio", "0.7");
 			config.emplace("noiseSigma", "0");
@@ -65,10 +69,6 @@ protected:
 			config.emplace("maxPixelStability", std::to_string(cvRound(20 * m_minStaticTime * m_fps)));
 			config.emplace("useHistory", "1");
 			config.emplace("isParallel", "1");
-			break;
-		case tracking::Detectors::Motion_SuBSENSE:
-			break;
-		case tracking::Detectors::Motion_LOBSTER:
 			break;
 		case tracking::Detectors::Motion_MOG2:
 			config.emplace("history", std::to_string(cvRound(20 * m_minStaticTime * m_fps)));
@@ -92,15 +92,17 @@ protected:
     ///
     bool InitTracker(cv::UMat frame) override
     {
+		m_logger->info("MotionDetectorExample::InitTracker");
+
 		if (!m_trackerSettingsLoaded)
 		{
-            m_trackerSettings.SetDistance(tracking::DistRects);
+            m_trackerSettings.SetDistance(tracking::DistCenters);
 			m_trackerSettings.m_kalmanType = tracking::KalmanLinear;
 			m_trackerSettings.m_filterGoal = tracking::FilterCenter;
             m_trackerSettings.m_lostTrackType = tracking::TrackNone; // Use visual objects tracker for collisions resolving. Used if m_filterGoal == tracking::FilterRect
 			m_trackerSettings.m_matchType = tracking::MatchHungrian;
 			m_trackerSettings.m_useAcceleration = false;             // Use constant acceleration motion model
-            m_trackerSettings.m_dt = m_trackerSettings.m_useAcceleration ? 0.05f : 0.5f; // Delta time for Kalman filter
+            m_trackerSettings.m_dt = m_trackerSettings.m_useAcceleration ? 0.05f : 0.3f; // Delta time for Kalman filter
             m_trackerSettings.m_accelNoiseMag = 0.1f;                // Accel noise magnitude for Kalman filter
             m_trackerSettings.m_distThres = 0.95f;                   // Distance threshold between region and object on two frames
 #if 1
@@ -115,17 +117,17 @@ protected:
 			{
 				m_trackerSettings.m_minStaticTime = m_minStaticTime;
 				m_trackerSettings.m_maxStaticTime = 10;
-				m_trackerSettings.m_maximumAllowedSkippedFrames = cvRound(m_trackerSettings.m_minStaticTime * m_fps); // Maximum allowed skipped frames
-				m_trackerSettings.m_maxTraceLength = 2 * m_trackerSettings.m_maximumAllowedSkippedFrames;        // Maximum trace length
+				m_trackerSettings.m_maximumAllowedLostTime = m_trackerSettings.m_minStaticTime;      // Maximum allowed lost time
+				m_trackerSettings.m_maxTraceLength = 2 * m_trackerSettings.m_maximumAllowedLostTime; // Maximum trace length
 			}
 			else
 			{
-				m_trackerSettings.m_maximumAllowedSkippedFrames = cvRound(2 * m_fps); // Maximum allowed skipped frames
-                m_trackerSettings.m_maxTraceLength = cvRound(2 * m_fps);              // Maximum trace length
+				m_trackerSettings.m_maximumAllowedLostTime = 2.;       // Maximum allowed lost time
+                m_trackerSettings.m_maxTraceLength = 2.;               // Maximum trace length
 			}
 		}
 
-        m_tracker = BaseTracker::CreateTracker(m_trackerSettings);
+        m_tracker = BaseTracker::CreateTracker(m_trackerSettings, m_fps);
         return true;
     }
 
@@ -138,8 +140,7 @@ protected:
     ///
     void DrawData(cv::Mat frame, const std::vector<TrackingObject>& tracks, int framesCounter, int currTime) override
     {
-        if (m_showLogs)
-			std::cout << "Frame " << framesCounter << " (" << m_framesCount << "): tracks = " << tracks.size() << ", time = " << currTime << std::endl;
+		m_logger->info("Frame {0} ({1}): tracks = {2}, time = {3}", framesCounter, m_framesCount, tracks.size(), currTime);
 
 #ifdef USE_CLIP
 		std::vector<CLIPResult> clipResult;
@@ -195,8 +196,9 @@ protected:
 				auto velocity = sqrt(sqr(track.m_velocity[0]) + sqr(track.m_velocity[1]));
 				if (track.IsRobust(4,             // Minimal trajectory size
 					0.3f,                         // Minimal ratio raw_trajectory_points / trajectory_lenght
-					cv::Size2f(0.2f, 5.0f)))    // Min and max ratio: width / height
-					//velocity > 30                // Velocity more than 30 pixels per second
+					cv::Size2f(0.2f, 5.0f),       // Min and max ratio: width / height
+					2))
+					//velocity > 30               // Velocity more than 30 pixels per second
 				{
 					//track_t mean = 0;
 					//track_t stddev = 0;

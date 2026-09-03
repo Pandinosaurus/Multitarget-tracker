@@ -35,13 +35,30 @@ private:
         YOLOV4,
         YOLOV4_TINY,
         YOLOV5,
+        YOLOV5_OBB,
+        YOLOV5Mask,
         YOLOV6,
         YOLOV7,
         YOLOV7Mask,
         YOLOV8,
+        YOLOV8_OBB,
         YOLOV8Mask,
         YOLOV9,
-        YOLOV10
+        YOLOV10,
+        YOLOV11,
+        YOLOV11_OBB,
+        YOLOV11Mask,
+        YOLOV12,
+        RFDETR,
+        RFDETR_IS,
+        DFINE,
+        YOLOV13,
+        DFINE_IS,
+        YOLOV26,
+        YOLOV26_OBB,
+        YOLOV26Mask,
+        YOLOE,
+        YOLOEMask
     };
 
     cv::dnn::Net m_net;
@@ -52,18 +69,38 @@ private:
     int m_inHeight = 608;
 
     float m_WHRatio = 1.f;
-    float m_inScaleFactor = 0.003921f;
-    float m_meanVal = 0.f;
+    double m_inScaleFactor = 0.003921; // 1 / 255
+    //double m_inScaleFactor = 1.0;
+    cv::Scalar m_meanVal = {0, 0, 0};
     float m_confidenceThreshold = 0.24f;
     track_t m_nmsThreshold = static_cast<track_t>(0.4);
-    bool m_swapRB = false;
+    bool m_swapRB = true;
     float m_maxCropRatio = 2.0f;
     ModelType m_netType = ModelType::Unknown;
     std::vector<std::string> m_classNames;
     std::vector<cv::String> m_outNames;
     std::vector<int> m_outLayers;
-    std::string m_outLayerType;
+    std::vector<std::string> m_outLayerTypes;
     cv::UMat m_inputBlob;
+
+    void ParseOldYOLO(const cv::Rect& crop, const std::vector<cv::Mat>& detections, regions_t& tmpRegions);
+
+    void ParseYOLOv5(const cv::Rect& crop, std::vector<cv::Mat>& detections, regions_t& tmpRegions);
+    void ParseYOLOv8(const cv::Rect& crop, std::vector<cv::Mat>& detections, regions_t& tmpRegions);
+    void ParseYOLOv9(const cv::Rect& crop, std::vector<cv::Mat>& detections, regions_t& tmpRegions);
+    void ParseYOLOv10(const cv::Rect& crop, std::vector<cv::Mat>& detections, regions_t& tmpRegions);
+    void ParseYOLOv11(const cv::Rect& crop, std::vector<cv::Mat>& detections, regions_t& tmpRegions);
+    void ParseYOLOv5_8_11_obb(const cv::Rect& crop, std::vector<cv::Mat>& detections, regions_t& tmpRegions);
+    void ParseYOLOv5_8_11_seg(const cv::Rect& crop, std::vector<cv::Mat>& detections, regions_t& tmpRegions);
+    void ParseRFDETR(const cv::Rect& crop, std::vector<cv::Mat>& detections, regions_t& tmpRegions);
+    void ParseRFDETR_IS(const cv::Rect& crop, std::vector<cv::Mat>& detections, regions_t& tmpRegions);
+    void ParseDFINE(const cv::Rect& crop, std::vector<cv::Mat>& detections, regions_t& tmpRegions);
+    void ParseDFINE_IS(const cv::Rect& crop, std::vector<cv::Mat>& detections, regions_t& tmpRegions);
+    void ParseYOLOv26(const cv::Rect& crop, std::vector<cv::Mat>& detections, regions_t& tmpRegions);
+    void ParseYOLOv26_obb(const cv::Rect& crop, std::vector<cv::Mat>& detections, regions_t& tmpRegions);
+    void ParseYOLOv26_seg(const cv::Rect& crop, std::vector<cv::Mat>& detections, regions_t& tmpRegions);
+    void ParseYOLOE(const cv::Rect& crop, std::vector<cv::Mat>& detections, regions_t& tmpRegions);
+    void ParseYOLOEMask(const cv::Rect& crop, std::vector<cv::Mat>& detections, regions_t& tmpRegions);
 };
 
 #endif

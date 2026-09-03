@@ -1,6 +1,6 @@
 #pragma once
 
-#include "Ctracker.h"
+#include "BaseTracker.h"
 
 #include <iostream>
 #include <vector>
@@ -54,10 +54,10 @@ void MouseTracking(cv::CommandLineParser parser)
 	settings.m_accelNoiseMag = 0.5f;
     settings.m_distThres = 0.8f;
     settings.m_minAreaRadiusPix = frame.rows / 20.f;
-	settings.m_maximumAllowedSkippedFrames = 25;
-	settings.m_maxTraceLength = 25;
+	settings.m_maximumAllowedLostTime = 1.;
+	settings.m_maxTraceLength = 1.;
 
-	std::unique_ptr<BaseTracker> tracker = BaseTracker::CreateTracker(settings);
+	std::unique_ptr<BaseTracker> tracker = BaseTracker::CreateTracker(settings, 30.f);
 
 	track_t alpha = 0;
 	cv::RNG rng;
@@ -92,7 +92,7 @@ void MouseTracking(cv::CommandLineParser parser)
 #endif
 		}
 
-		tracker->Update(regions, cv::UMat(), 100);
+		tracker->Update(regions, cv::UMat(), std::chrono::system_clock::now());
 
 		std::vector<TrackingObject> tracks;
 		tracker->GetTracks(tracks);

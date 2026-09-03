@@ -13,11 +13,14 @@ struct TrackerSettings
     ///
     /// Tracker settings
     ///
+    /// 
+
+    tracking::TrackerTemplate m_tracker = tracking::UniversalTracker;
 
     tracking::KalmanType m_kalmanType = tracking::KalmanLinear;
     tracking::FilterGoal m_filterGoal = tracking::FilterCenter;
     tracking::LostTrackType m_lostTrackType = tracking::TrackKCF; // Used if m_filterGoal == tracking::FilterRect
-    tracking::MatchType m_matchType = tracking::MatchHungrian;
+    tracking::MatchType m_matchType = tracking::MatchLAPJV;
 
     std::array<track_t, tracking::DistsCount> m_distType;
 
@@ -58,16 +61,16 @@ struct TrackerSettings
     track_t m_minAreaRadiusK = 0.5f;
 
     ///
-    /// \brief m_maximumAllowedSkippedFrames
-    /// If the object don't assignment more than this frames then it will be removed
+    /// \brief m_maximumAllowedLostTime
+    /// If the object don't assignment more than this time in seconds then it will be removed
     ///
-    size_t m_maximumAllowedSkippedFrames = 25;
+    double m_maximumAllowedLostTime = 1.;
 
     ///
     /// \brief m_maxTraceLength
-    /// The maximum trajectory length
+    /// The maximum trajectory length in seconds
     ///
-    size_t m_maxTraceLength = 50;
+    double m_maxTraceLength = 2.f;
 
     ///
     /// \brief m_useAbandonedDetection
@@ -87,16 +90,29 @@ struct TrackerSettings
     int m_maxStaticTime = 25;
     ///
     /// \brief m_maxSpeedForStatic
-    /// Speed in pixels
+    /// Speed in meters
     /// If speed of object is more that this value than object is non static
     ///
-    int m_maxSpeedForStatic = 10;
+    track_t m_maxSpeedForStatic = 0.5f;
 
     ///
     /// \brief m_nearTypes
     /// Object types that can be matched while tracking
     ///
     std::map<objtype_t, std::set<objtype_t>> m_nearTypes;
+
+	///
+    /// \brief struct ByteTrackSettings
+    /// Settings only for m_tracker = tracking::ByteTrack
+    ///
+	struct ByteTrackSettings
+	{
+		int m_trackBuffer = 30;
+		float m_trackThresh = 0.5f;
+		float m_highThresh = 0.5f;
+		float m_matchThresh = 0.8f;
+	};
+    ByteTrackSettings m_byteTrackSettings;
 
 
     ///
@@ -145,10 +161,9 @@ struct TrackerSettings
     /// FP32
     std::string m_inferencePrecision = "FP16";
 
-    // opencv_dnn = 12
-    // darknet_cudnn = 10
-    // tensorrt = 11
-    int m_detectorBackend = 11;
+    // opencv_dnn = 6
+    // tensorrt = 5
+    int m_detectorBackend = 5;
 
     // DNN_TARGET_CPU
     // DNN_TARGET_OPENCL

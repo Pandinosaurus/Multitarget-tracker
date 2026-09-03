@@ -1,7 +1,7 @@
 #pragma once
 
 #include <memory>
-#include "defines.h"
+#include "mtracking/defines.h"
 
 ///
 /// \brief The KeyVal struct
@@ -82,7 +82,7 @@ public:
         for (size_t i = 0; i < frames.size(); ++i)
         {
             Detect(frames[i]);
-            auto res = GetDetects();
+            const auto& res = GetDetects();
             regions[i].assign(std::begin(res), std::end(res));
         }
     }
@@ -159,7 +159,7 @@ public:
     /// \brief CalcMotionMap
     /// \param frame
     ///
-    virtual void CalcMotionMap(cv::Mat& frame)
+    virtual void CalcMotionMap(cv::Mat& frame, bool drawOnlyMasks = true)
     {
         if (m_motionMap.size() != frame.size())
             m_motionMap = cv::Mat(frame.size(), CV_32FC1, cv::Scalar(0, 0, 0));
@@ -167,17 +167,22 @@ public:
         cv::Mat foreground(m_motionMap.size(), CV_8UC1, cv::Scalar(0, 0, 0));
         for (const auto& region : m_regions)
         {
-#if (CV_VERSION_MAJOR < 4)
-            cv::ellipse(foreground, region.m_rrect, cv::Scalar(255, 255, 255), CV_FILLED);
-#else
-            cv::ellipse(foreground, region.m_rrect, cv::Scalar(255, 255, 255), cv::FILLED);
-#endif
+            if (region.m_boxMask.empty())
+            {
+                if (!drawOnlyMasks)
+                    cv::ellipse(foreground, region.m_rrect, cv::Scalar(255, 255, 255), cv::FILLED);
+            }
+            else
+            {
+                cv::Rect brect = Clamp(cv::Rect(region.m_brect.x, region.m_brect.y, region.m_boxMask.cols, region.m_boxMask.rows), foreground.size());
+                region.m_boxMask.copyTo(foreground(brect));
+            }
         }
         if (!m_ignoreMask.empty())
             cv::bitwise_and(foreground, m_ignoreMask, foreground);
         cv::normalize(foreground, m_normFor, 255, 0, cv::NORM_MINMAX, m_motionMap.type());
 
-        double alpha = 0.95;
+        double alpha = 0.9;
         cv::addWeighted(m_motionMap, alpha, m_normFor, 1 - alpha, 0, m_motionMap);
 
         const int chans = frame.channels();

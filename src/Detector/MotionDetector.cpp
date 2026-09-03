@@ -1,4 +1,7 @@
 #include "MotionDetector.h"
+#if (CV_VERSION_MAJOR > 4)
+#include <opencv2/geometry.hpp>
+#endif
 
 ///
 /// \brief MotionDetector::MotionDetector
@@ -45,11 +48,10 @@ void MotionDetector::DetectContour()
 {
 	m_regions.clear();
     std::vector<std::vector<cv::Point>> contours;
-    std::vector<cv::Vec4i> hierarchy;
-#if (CV_VERSION_MAJOR < 4)
-	cv::findContours(m_fg, contours, hierarchy, CV_RETR_EXTERNAL, CV_CHAIN_APPROX_SIMPLE, cv::Point());
+#if ((CV_VERSION_MAJOR > 4) || ((CV_VERSION_MAJOR == 4) && (CV_VERSION_MINOR > 9)))
+	cv::findContoursLinkRuns(m_fg, contours);
 #else
-    cv::findContours(m_fg, contours, hierarchy, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE, cv::Point());
+	cv::findContours(m_fg, contours, cv::RETR_EXTERNAL, cv::CHAIN_APPROX_SIMPLE, cv::Point());
 #endif
 	for (size_t i = 0; i < contours.size(); ++i)
 	{
@@ -98,7 +100,7 @@ void MotionDetector::ResetModel(const cv::UMat& img, const cv::Rect& roiRect)
 /// \brief MotionDetector::CalcMotionMap
 /// \param frame
 ///
-void MotionDetector::CalcMotionMap(cv::Mat& frame)
+void MotionDetector::CalcMotionMap(cv::Mat& frame, bool /*drawOnlyMasks*/)
 {
 	if (m_motionMap.size() != frame.size())
 		m_motionMap = cv::Mat(frame.size(), CV_32FC1, cv::Scalar(0, 0, 0));

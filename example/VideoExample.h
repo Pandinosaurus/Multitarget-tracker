@@ -9,9 +9,15 @@
 #include <atomic>
 
 #include "BaseDetector.h"
-#include "Ctracker.h"
+#include "BaseTracker.h"
 #include "FileLogger.h"
 #include "cvatAnnotationsGenerator.h"
+
+#include "spdlog/spdlog.h"
+#include "spdlog/async.h"
+#include "spdlog/sinks/stdout_color_sinks.h"
+#include "spdlog/sinks/basic_file_sink.h"
+#include "spdlog/sinks/rotating_file_sink.h"
 
 ///
 /// \brief The Frame struct
@@ -20,19 +26,38 @@ class Frame
 {
 public:
     Frame() = default;
-    Frame(cv::Mat imgBGR)
+    Frame(cv::Mat imgBGR, bool useCLAHE)
     {
         m_mBGR = imgBGR;
+        if (useCLAHE)
+        {
+            m_clahe = cv::createCLAHE(1.2, cv::Size(4, 4));
+            AdjustMatBGR();
+        }
     }
 
     ///
-    bool empty() const
+    void SetUseAdjust(bool useCLAHE)
+    {
+        if (useCLAHE)
+        {
+            m_clahe = cv::createCLAHE(1.2, cv::Size(4, 4));
+            AdjustMatBGR();
+        }
+        else
+        {
+            m_clahe.reset();
+        }
+    }
+
+    ///
+    bool empty() const noexcept
     {
         return m_mBGR.empty();
     }
 
     ///
-    const cv::Mat& GetMatBGR()
+    const cv::Mat& GetMatBGR() const noexcept
     {
         return m_mBGR;
     }
@@ -43,6 +68,22 @@ public:
         m_mGrayGenerated = false;
         m_umGrayGenerated = false;
         return m_mBGR;
+    }
+    ///
+    bool AdjustMatBGR()
+    {
+        if (m_mBGR.empty() || m_clahe.empty())
+            return false;
+
+        cv::cvtColor(m_mBGR, m_mHSV, cv::COLOR_BGR2HSV);
+        cv::split(m_mHSV, m_chansHSV);
+        m_clahe->apply(m_chansHSV[2], m_chansHSV[2]);
+        cv::merge(m_chansHSV, m_mHSV);
+        cv::cvtColor(m_mHSV, m_mBGR, cv::COLOR_HSV2BGR);
+
+        //std::cout << "AdjustMatBGR()" << std::endl;
+
+        return true;
     }
     ///
     const cv::Mat& GetMatGray()
@@ -104,6 +145,10 @@ private:
     bool m_umGrayGenerated = false;
     std::thread::id m_umBGRThreadID;
     std::thread::id m_umGrayThreadID;
+
+    cv::Ptr<cv::CLAHE> m_clahe;
+    cv::Mat m_mHSV;
+    std::vector<cv::Mat> m_chansHSV;
 };
 
 ///
@@ -162,6 +207,7 @@ struct FrameInfo
     std::vector<regions_t> m_regions;
     std::vector<std::vector<TrackingObject>> m_tracks;
     std::vector<int> m_frameInds;
+    std::vector<time_point_t> m_frameTimeStamps;
 
     size_t m_batchSize = 1;
 
@@ -193,10 +239,12 @@ protected:
     std::unique_ptr<BaseDetector> m_detector;
     std::unique_ptr<BaseTracker> m_tracker;
 
-    bool m_showLogs = true;
+    std::string m_showLogsLevel = "debug";
     float m_fps = 25;
 	cv::Size m_frameSize;
 	int m_framesCount = 0;
+
+    bool m_useContrastAdjustment = false;
 
 	size_t m_batchSize = 1;
 
@@ -222,6 +270,10 @@ protected:
 
     std::vector<cv::Scalar> m_colors;
 
+    std::shared_ptr<spdlog::sinks::stdout_color_sink_mt> m_consoleSink;
+    std::shared_ptr<spdlog::sinks::rotating_file_sink_mt> m_fileSink;
+    std::shared_ptr<spdlog::logger> m_logger;
+
 private:
 	std::vector<TrackingObject> m_tracks;
 
@@ -229,16 +281,22 @@ private:
     bool m_isDetectorInitialized = false;
     std::string m_inFile;
     std::string m_outFile;
-    int m_fourcc = cv::VideoWriter::fourcc('h', '2', '6', '5'); //cv::VideoWriter::fourcc('M', 'J', 'P', 'G');
+#if 0
+    int m_fourcc = cv::VideoWriter::fourcc('h', '2', '6', '4');
+#else
+    int m_fourcc = cv::VideoWriter::fourcc('M', 'J', 'P', 'G');
+#endif
     int m_startFrame = 0;
     int m_endFrame = 0;
     int m_finishDelay = 0;
+    
+    time_point_t m_startTimeStamp;
+    bool m_useArchieveTime = true;
 
     FrameInfo m_frameInfo[2];
+    
+    time_point_t GetNextTimeStamp(int framesCounter) const;
 
     bool OpenCapture(cv::VideoCapture& capture);
     bool WriteFrame(cv::VideoWriter& writer, const cv::Mat& frame);
 };
-
-///
-void DrawFilledRect(cv::Mat& frame, const cv::Rect& rect, cv::Scalar cl, int alpha);

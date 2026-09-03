@@ -4,35 +4,6 @@
 #include "VideoExample.h"
 
 ///
-/// \brief DrawFilledRect
-///
-void DrawFilledRect(cv::Mat& frame, const cv::Rect& rect, cv::Scalar cl, int alpha)
-{
-    if (alpha)
-    {
-        const int alpha_1 = 255 - alpha;
-        const int nchans = frame.channels();
-        int color[3] = { cv::saturate_cast<int>(cl[0]), cv::saturate_cast<int>(cl[1]), cv::saturate_cast<int>(cl[2]) };
-        for (int y = rect.y; y < rect.y + rect.height; ++y)
-        {
-            uchar* ptr = frame.ptr(y) + nchans * rect.x;
-            for (int x = rect.x; x < rect.x + rect.width; ++x)
-            {
-                for (int i = 0; i < nchans; ++i)
-                {
-                    ptr[i] = cv::saturate_cast<uchar>((alpha_1 * ptr[i] + alpha * color[i]) / 255);
-                }
-                ptr += nchans;
-            }
-        }
-    }
-    else
-    {
-        cv::rectangle(frame, rect, cl, cv::FILLED);
-    }
-}
-
-///
 /// \brief VideoExample::VideoExample
 /// \param parser
 ///
@@ -42,11 +13,12 @@ VideoExample::VideoExample(const cv::CommandLineParser& parser)
 {
     m_inFile = parser.get<std::string>(0);
     m_outFile = parser.get<std::string>("out");
-    m_showLogs = parser.get<int>("show_logs") != 0;
+    m_showLogsLevel = parser.get<std::string>("show_logs");
     m_startFrame = parser.get<int>("start_frame");
     m_endFrame = parser.get<int>("end_frame");
     m_finishDelay = parser.get<int>("end_delay");
 	m_batchSize = std::max(1, parser.get<int>("batch_size"));
+    m_useContrastAdjustment = parser.get<int>("contrast_adjustment") != 0;
 
     m_colors.emplace_back(255, 0, 0);
     m_colors.emplace_back(0, 255, 0);
@@ -60,6 +32,33 @@ VideoExample::VideoExample(const cv::CommandLineParser& parser)
 
     m_resultsLog.Open();
 
+    // Create loggers
+    m_consoleSink = std::make_shared<spdlog::sinks::stdout_color_sink_mt>();
+    m_consoleSink->set_level(spdlog::level::from_str(m_showLogsLevel));
+    m_consoleSink->set_pattern("[%^%l%$] %v");
+
+    auto currentTime = std::chrono::system_clock::now();
+    auto transformed = currentTime.time_since_epoch().count() / 1000000;
+    std::time_t tt = std::chrono::system_clock::to_time_t(currentTime);
+    char buffer[80];
+#ifdef WIN32
+    tm timeInfo;
+    localtime_s(&timeInfo, &tt);
+    strftime(buffer, 80, "%G%m%d_%H%M%S", &timeInfo);
+#else
+    auto timeInfo = localtime(&tt);
+    strftime(buffer, 80, "%G%m%d_%H%M%S", timeInfo);
+#endif
+
+    size_t max_size = 1024 * 1024 * 5;
+    size_t max_files = 3;
+    m_fileSink = std::make_shared<spdlog::sinks::rotating_file_sink_mt>("logs/" + std::string(buffer) + std::to_string(transformed % 1000) + ".txt", max_size, max_files);
+    m_fileSink->set_level(spdlog::level::from_str(m_showLogsLevel));
+
+    m_logger = std::shared_ptr<spdlog::logger>(new spdlog::logger("traffic", { m_consoleSink, m_fileSink }));
+    m_logger->set_level(spdlog::level::from_str(m_showLogsLevel));
+    m_logger->info("Start service");
+
     std::string settingsFile = parser.get<std::string>("settings");
     m_trackerSettingsLoaded = ParseTrackerSettings(settingsFile, m_trackerSettings);
 
@@ -68,6 +67,16 @@ VideoExample::VideoExample(const cv::CommandLineParser& parser)
 		m_frameInfo[0].SetBatchSize(m_batchSize);
 		m_frameInfo[1].SetBatchSize(m_batchSize);
 	}
+    for (auto& fr : m_frameInfo[0].m_frames)
+    {
+        fr.SetUseAdjust(m_useContrastAdjustment);
+    }
+    for (auto& fr : m_frameInfo[1].m_frames)
+    {
+        fr.SetUseAdjust(m_useContrastAdjustment);
+    }
+
+    m_startTimeStamp = currentTime;
 }
 
 ///
@@ -90,7 +99,7 @@ void VideoExample::SyncProcess()
     cv::VideoCapture capture;
     if (!OpenCapture(capture))
     {
-        std::cerr << "Can't open " << m_inFile << std::endl;
+        m_logger->critical("Can't open {}", m_inFile);
         return;
     }
 
@@ -135,11 +144,23 @@ void VideoExample::SyncProcess()
 	FrameInfo frameInfo(m_batchSize);
 	frameInfo.m_frames.resize(frameInfo.m_batchSize);
 	frameInfo.m_frameInds.resize(frameInfo.m_batchSize);
+    frameInfo.m_frameTimeStamps.resize(frameInfo.m_batchSize);
+
+    for (auto& fr : frameInfo.m_frames)
+    {
+        fr.SetUseAdjust(m_useContrastAdjustment);
+    }
 
     int64 startLoopTime = cv::getTickCount();
 
+    //double fps = capture.get(cv::CAP_PROP_FPS);
+    //double readPeriodSeconds = 2.;
+    //int readPeriodFrames = cvRound(readPeriodSeconds * fps);
+
     for (;;)
     {
+        //int currFramesPos = cvRound(capture.get(cv::CAP_PROP_POS_FRAMES));
+
 		size_t i = 0;
 		for (; i < m_batchSize; ++i)
 		{
@@ -147,16 +168,22 @@ void VideoExample::SyncProcess()
 			if (frameInfo.m_frames[i].empty())
 				break;
 			frameInfo.m_frameInds[i] = framesCounter;
+            frameInfo.m_frameTimeStamps[i] = GetNextTimeStamp(framesCounter);
+            frameInfo.m_frames[i].AdjustMatBGR();
 
 			++framesCounter;
 			if (m_endFrame && framesCounter > m_endFrame)
 			{
-				std::cout << "Process: riched last " << m_endFrame << " frame" << std::endl;
+                m_logger->info("Process: riched last {} frame", m_endFrame);
 				break;
 			}
+
+            m_logger->debug("VideoExample::SyncProcess: Capture {0} frame", framesCounter);
 		}
 		if (i < m_batchSize)
 			break;
+
+        //capture.set(cv::CAP_PROP_POS_FRAMES, currFramesPos + readPeriodFrames);
 
 		if (!m_isDetectorInitialized || !m_isTrackerInitialized)
 		{
@@ -166,7 +193,7 @@ void VideoExample::SyncProcess()
 				m_isDetectorInitialized = InitDetector(ufirst);
 				if (!m_isDetectorInitialized)
 				{
-					std::cerr << "CaptureAndDetect: Detector initialize error!!!" << std::endl;
+                    m_logger->critical("CaptureAndDetect: Detector initialize error!!!");
 					break;
 				}
 			}
@@ -175,7 +202,7 @@ void VideoExample::SyncProcess()
 				m_isTrackerInitialized = InitTracker(ufirst);
 				if (!m_isTrackerInitialized)
 				{
-					std::cerr << "CaptureAndDetect: Tracker initialize error!!!" << std::endl;
+                    m_logger->critical("CaptureAndDetect: Tracker initialize error!!!");
 					break;
 				}
 			}
@@ -183,7 +210,6 @@ void VideoExample::SyncProcess()
 
         int64 t1 = cv::getTickCount();
 
-        regions_t regions;
         Detection(frameInfo);
         Tracking(frameInfo);
         int64 t2 = cv::getTickCount();
@@ -218,13 +244,11 @@ void VideoExample::SyncProcess()
 
     int64 stopLoopTime = cv::getTickCount();
 
-    std::cout << "algorithms time = " << (allTime / freq) << ", work time = " << ((stopLoopTime - startLoopTime) / freq) << std::endl;
+    m_logger->info("algorithms time = {0}, work time = {1}", allTime / freq, (stopLoopTime - startLoopTime) / freq);
 #ifndef SILENT_WORK
     cv::waitKey(m_finishDelay);
 #endif
 }
-
-#define SHOW_ASYNC_LOGS 0
 
 ///
 /// \brief VideoExample::AsyncProcess
@@ -250,26 +274,22 @@ void VideoExample::AsyncProcess()
     for (; !stopCapture.load(); )
     {
         FrameInfo& frameInfo = m_frameInfo[processCounter % 2];
-#if SHOW_ASYNC_LOGS
-        std::cout << "--- waiting tracking from " << (processCounter % 2) << " ind = " << processCounter << std::endl;
-#endif
+        m_logger->debug("--- waiting tracking from {0} ind = {1}", processCounter % 2, processCounter);
         {
             std::unique_lock<std::mutex> lock(frameInfo.m_mutex);
             if (!frameInfo.m_cond.wait_for(lock, std::chrono::milliseconds(m_captureTimeOut), [&frameInfo] { return frameInfo.m_captured.load(); }))
             {
-                std::cout << "--- Wait frame timeout!" << std::endl;
+                m_logger->info("--- Wait frame timeout!");
                 break;
             }
         }
-#if SHOW_ASYNC_LOGS
-        std::cout << "--- tracking from " << (processCounter % 2) << " in progress..." << std::endl;
-#endif
+        m_logger->debug("--- tracking from {} in progress...", processCounter % 2);
         if (!m_isTrackerInitialized)
         {
             m_isTrackerInitialized = InitTracker(frameInfo.m_frames[0].GetUMatBGR());
             if (!m_isTrackerInitialized)
             {
-                std::cerr << "--- AsyncProcess: Tracker initialize error!!!" << std::endl;
+                m_logger->critical("--- AsyncProcess: Tracker initialize error!!!");
                 frameInfo.m_cond.notify_one();
                 break;
             }
@@ -284,9 +304,7 @@ void VideoExample::AsyncProcess()
         allTime += t2 - t1 + frameInfo.m_dt;
         int currTime = cvRound(1000 * (t2 - t1 + frameInfo.m_dt) / freq);
 
-#if SHOW_ASYNC_LOGS
-        std::cout << "--- Frame " << frameInfo.m_frameInds[0] << ": td = " << (1000 * frameInfo.m_dt / freq) << ", tt = " << (1000 * (t2 - t1) / freq) << std::endl;
-#endif
+        m_logger->debug("--- Frame {0}: td = {1}, tt = {2}", frameInfo.m_frameInds[0], 1000 * frameInfo.m_dt / freq, 1000 * (t2 - t1) / freq);
 
 		int key = 0;
 		for (size_t i = 0; i < m_batchSize; ++i)
@@ -311,9 +329,7 @@ void VideoExample::AsyncProcess()
 
         {
             std::unique_lock<std::mutex> lock(frameInfo.m_mutex);
-#if SHOW_ASYNC_LOGS
-            std::cout << "--- tracking m_captured " << (processCounter % 2) << " - captured still " << frameInfo.m_captured.load() << std::endl;
-#endif
+            m_logger->debug("--- tracking m_captured {0} - captured still {1}", processCounter % 2, frameInfo.m_captured.load());
             assert(frameInfo.m_captured.load());
             frameInfo.m_captured = false;
         }
@@ -336,7 +352,7 @@ void VideoExample::AsyncProcess()
 
     int64 stopLoopTime = cv::getTickCount();
 
-    std::cout << "--- algorithms time = " << (allTime / freq) << ", work time = " << ((stopLoopTime - startLoopTime) / freq) << std::endl;
+    m_logger->info("--- algorithms time = {0}, work time = {1}", allTime / freq, (stopLoopTime - startLoopTime) / freq);
 
 #ifndef SILENT_WORK
     cv::waitKey(m_finishDelay);
@@ -353,7 +369,7 @@ void VideoExample::CaptureAndDetect(VideoExample* thisPtr, std::atomic<bool>& st
     cv::VideoCapture capture;
     if (!thisPtr->OpenCapture(capture))
     {
-        std::cerr << "+++ Can't open " << thisPtr->m_inFile << std::endl;
+        thisPtr->m_logger->critical("+++ Can't open {}", thisPtr->m_inFile);
         stopCapture = true;
         return;
     }
@@ -367,25 +383,22 @@ void VideoExample::CaptureAndDetect(VideoExample* thisPtr, std::atomic<bool>& st
     for (; !stopCapture.load();)
     {
         FrameInfo& frameInfo = thisPtr->m_frameInfo[processCounter % 2];
-#if SHOW_ASYNC_LOGS
-        std::cout << "+++ waiting capture to " << (processCounter % 2) << " ind = " << processCounter << std::endl;
-#endif
+        thisPtr->m_logger->debug("+++ waiting capture to {0}, ind = {1}", processCounter % 2, processCounter);
         {
             std::unique_lock<std::mutex> lock(frameInfo.m_mutex);
             if (!frameInfo.m_cond.wait_for(lock, std::chrono::milliseconds(localTrackingTimeOut), [&frameInfo] { return !frameInfo.m_captured.load(); }))
             {
-                std::cout << "+++ Wait tracking timeout!" << std::endl;
+                thisPtr->m_logger->info("+++ Wait tracking timeout!");
                 frameInfo.m_cond.notify_one();
                 break;
             }
         }
-#if SHOW_ASYNC_LOGS
-        std::cout << "+++ capture to " << (processCounter % 2) << " in progress..." << std::endl;
-#endif
+        thisPtr->m_logger->debug("+++ capture to {0} in progress...", processCounter % 2);
 		if (frameInfo.m_frames.size() < frameInfo.m_batchSize)
 		{
 			frameInfo.m_frames.resize(frameInfo.m_batchSize);
 			frameInfo.m_frameInds.resize(frameInfo.m_batchSize);
+            frameInfo.m_frameTimeStamps.resize(frameInfo.m_batchSize);
 		}
 
         cv::Mat frame;
@@ -395,17 +408,19 @@ void VideoExample::CaptureAndDetect(VideoExample* thisPtr, std::atomic<bool>& st
 			capture >> frame;
 			if (frame.empty())
 			{
-				std::cerr << "+++ CaptureAndDetect: frame is empty!" << std::endl;
+                thisPtr->m_logger->error("+++ CaptureAndDetect: frame is empty!");
 				frameInfo.m_cond.notify_one();
 				break;
 			}
             frameInfo.m_frames[i].GetMatBGRWrite() = frame;
-			frameInfo.m_frameInds[i] = framesCounter;
+            frameInfo.m_frames[i].AdjustMatBGR();
+            frameInfo.m_frameInds[i] = framesCounter;
+            frameInfo.m_frameTimeStamps[i] = thisPtr->GetNextTimeStamp(framesCounter);
 			++framesCounter;
 
             if (localEndFrame && framesCounter > localEndFrame)
             {
-                std::cout << "+++ Process: riched last " << localEndFrame << " frame" << std::endl;
+                thisPtr->m_logger->info("+++ Process: riched last {} frame", localEndFrame);
                 break;
             }
         }
@@ -418,7 +433,7 @@ void VideoExample::CaptureAndDetect(VideoExample* thisPtr, std::atomic<bool>& st
             localIsDetectorInitialized = thisPtr->m_isDetectorInitialized;
             if (!thisPtr->m_isDetectorInitialized)
             {
-                std::cerr << "+++ CaptureAndDetect: Detector initialize error!!!" << std::endl;
+                thisPtr->m_logger->critical("+++ CaptureAndDetect: Detector initialize error!!!");
                 frameInfo.m_cond.notify_one();
                 break;
             }
@@ -431,9 +446,7 @@ void VideoExample::CaptureAndDetect(VideoExample* thisPtr, std::atomic<bool>& st
 
         {
             std::unique_lock<std::mutex> lock(frameInfo.m_mutex);
-#if SHOW_ASYNC_LOGS
-            std::cout << "+++ capture m_captured " << (processCounter % 2) << " - captured still " << frameInfo.m_captured.load() << std::endl;
-#endif
+            thisPtr->m_logger->debug("+++ capture m_captured {0} - captured still {1}", processCounter % 2, frameInfo.m_captured.load());
             assert(!frameInfo.m_captured.load());
             frameInfo.m_captured = true;
         }
@@ -442,6 +455,19 @@ void VideoExample::CaptureAndDetect(VideoExample* thisPtr, std::atomic<bool>& st
 		++processCounter;
     }
     stopCapture = true;
+}
+
+///
+/// \brief VideoExample::GetNextTimeStamp
+/// \param framesCounter
+/// \return
+///
+time_point_t VideoExample::GetNextTimeStamp(int framesCounter) const
+{
+    if (m_useArchieveTime)
+        return m_startTimeStamp + std::chrono::milliseconds(cvRound(framesCounter * (1000.f / m_fps)));
+    else
+        return std::chrono::system_clock::now();
 }
 
 ///
@@ -484,10 +510,7 @@ void VideoExample::Tracking(FrameInfo& frame)
 	frame.CleanTracks();
 	for (size_t i = 0; i < frame.m_frames.size(); ++i)
 	{
-		if (m_tracker->CanColorFrameToTrack())
-			m_tracker->Update(frame.m_regions[i], frame.m_frames[i].GetUMatBGR(), m_fps);
-		else
-			m_tracker->Update(frame.m_regions[i], frame.m_frames[i].GetUMatGray(), m_fps);
+		m_tracker->Update(frame.m_regions[i], frame.m_frames[i].GetUMatBGR(), frame.m_frameTimeStamps[i]);
 		m_tracker->GetTracks(frame.m_tracks[i]);
 
 		m_cvatAnnotationsGenerator.NewDetects(frame.m_frameInds[i], frame.m_tracks[i], 0);
@@ -509,13 +532,19 @@ void VideoExample::DrawTrack(cv::Mat frame,
                              const std::string& userLabel)
 {
     cv::Scalar color = track.m_isStatic ? cv::Scalar(255, 0, 255) : cv::Scalar(0, 255, 0);
+    cv::Rect brect = track.m_rrect.boundingRect();
+
+#if 0
     cv::Point2f rectPoints[4];
     track.m_rrect.points(rectPoints);
-    //std::cout << "track.m_rrect: " << track.m_rrect.center << ", " << track.m_rrect.angle << ", " << track.m_rrect.size << std::endl;
+    //std::cout << "track: rrect [" << track.m_rrect.size << " from " << track.m_rrect.center << ", " << track.m_rrect.angle << "]" << std::endl;
     for (int i = 0; i < 4; ++i)
     {
         cv::line(frame, rectPoints[i], rectPoints[(i+1) % 4], color);
     }
+#else
+    cv::rectangle(frame, brect, color);
+#endif
 
 #if 0
 #if 0
@@ -584,14 +613,14 @@ void VideoExample::DrawTrack(cv::Mat frame,
         }
     }
 
-    cv::Rect brect = track.m_rrect.boundingRect();
-    std::string label = track.m_ID.ID2Str();
+    std::stringstream label;
+    label << track.m_ID.ID2Str();
     if (track.m_type != bad_type)
-        label += ": " + TypeConverter::Type2Str(track.m_type);
+        label << ": " << TypeConverter::Type2Str(track.m_type);
     else if (!userLabel.empty())
-        label += ": " + userLabel;
+        label << ": " << userLabel;
     if (track.m_confidence > 0)
-        label += ", " + std::to_string(track.m_confidence);
+        label << ", " << std::fixed << std::setw(2) << std::setprecision(2) << track.m_confidence;
 #if 0
     track_t mean = 0;
     track_t stddev = 0;
@@ -619,7 +648,7 @@ void VideoExample::DrawTrack(cv::Mat frame,
 #endif
     int baseLine = 0;
     double fontScale = (frame.cols < 1920) ? 0.5 : 0.7;
-    cv::Size labelSize = cv::getTextSize(label, cv::FONT_HERSHEY_TRIPLEX, fontScale, 1, &baseLine);
+    cv::Size labelSize = cv::getTextSize(label.str(), cv::FONT_HERSHEY_TRIPLEX, fontScale, 1, &baseLine);
     if (brect.x < 0)
     {
         brect.width = std::min(brect.width, frame.cols - 1);
@@ -641,7 +670,7 @@ void VideoExample::DrawTrack(cv::Mat frame,
         brect.height = std::min(brect.height, frame.rows - 1);
     }
     DrawFilledRect(frame, cv::Rect(cv::Point(brect.x, brect.y - labelSize.height), cv::Size(labelSize.width, labelSize.height + baseLine)), cv::Scalar(200, 200, 200), 150);
-    cv::putText(frame, label, brect.tl(), cv::FONT_HERSHEY_TRIPLEX, fontScale, cv::Scalar(0, 0, 0));
+    cv::putText(frame, label.str(), brect.tl(), cv::FONT_HERSHEY_TRIPLEX, fontScale, cv::Scalar(0, 0, 0));
 
 	m_resultsLog.AddTrack(framesCounter, track.m_ID, brect, track.m_type, track.m_confidence);
 	m_resultsLog.AddRobustTrack(track.m_ID);

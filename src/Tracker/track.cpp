@@ -1,11 +1,5 @@
 #include "track.h"
 
-#include "dat/dat_tracker.hpp"
-#ifdef USE_STAPLE_TRACKER
-#include "staple/staple_tracker.hpp"
-#include "ldes/ldes_tracker.h"
-#endif
-
 #include "Circular_Code/CircVal.h"
 #include "Circular_Code/CircStat.h"
 
@@ -26,13 +20,15 @@ CTrack::CTrack(const CRegion& region,
                bool useAcceleration,
                track_id_t trackID,
                tracking::FilterGoal filterGoal,
-               tracking::LostTrackType externalTrackerForLost)
+               tracking::LostTrackType externalTrackerForLost,
+               time_point_t currTime)
     :
       m_kalman(kalmanType, useAcceleration, deltaTime, accelNoiseMag),
       m_lastRegion(region),
       m_predictionRect(region.m_rrect),
       m_predictionPoint(region.m_rrect.center),
       m_trackID(trackID),
+      m_lastDetectionTime(currTime),
       m_currType(region.m_type),
       m_lastType(region.m_type),
       m_externalTrackerForLost(externalTrackerForLost),
@@ -54,7 +50,8 @@ CTrack::CTrack(const CRegion& region,
 	};
 
     Point_t pt(m_predictionPoint.x, m_predictionPoint.y + region.m_brect.height / 2);
-    m_trace.push_back(pt, pt);
+    m_trace.push_back(pt, pt, currTime);
+    ResetLostTime(currTime);
 }
 
 ///
@@ -77,13 +74,15 @@ CTrack::CTrack(const CRegion& region,
                bool useAcceleration,
                track_id_t trackID,
                tracking::FilterGoal filterGoal,
-               tracking::LostTrackType externalTrackerForLost)
+               tracking::LostTrackType externalTrackerForLost,
+               time_point_t currTime)
     :
       m_kalman(kalmanType, useAcceleration, deltaTime, accelNoiseMag),
       m_lastRegion(region),
       m_predictionRect(region.m_rrect),
       m_predictionPoint(region.m_rrect.center),
       m_trackID(trackID),
+      m_lastDetectionTime(currTime),
       m_currType(region.m_type),
       m_lastType(region.m_type),
       m_externalTrackerForLost(externalTrackerForLost),
@@ -104,7 +103,7 @@ CTrack::CTrack(const CRegion& region,
 		m_kalman.Update(region.m_rrect, true);
 		break;
 	};
-    m_trace.push_back(m_predictionPoint, m_predictionPoint);
+    m_trace.push_back(m_predictionPoint, m_predictionPoint, currTime);
 }
 
 ///
@@ -236,7 +235,7 @@ std::pair<track_t, bool> CTrack::CalcCosine(const RegionEmbedding& embedding) co
         //assert(0);
         //CV_Assert(!embedding.m_embedding.empty());
         //CV_Assert(!m_regionEmbedding.m_embedding.empty());
-        return { 0, false };
+        return { (track_t)0, false };
     }
 }
 
@@ -244,17 +243,18 @@ std::pair<track_t, bool> CTrack::CalcCosine(const RegionEmbedding& embedding) co
 /// \brief CTrack::Update
 /// \param region
 /// \param dataCorrect
-/// \param max_trace_length
+/// \param maxTraceLength
 /// \param prevFrame
 /// \param currFrame
 /// \param trajLen
 ///
 void CTrack::Update(const CRegion& region,
                     bool dataCorrect,
-                    size_t max_trace_length,
+                    double maxTraceLength,
                     cv::UMat prevFrame,
                     cv::UMat currFrame,
-                    int trajLen, int maxSpeedForStatic)
+                    int trajLen, int maxSpeedForStatic,
+                    time_point_t currTime)
 {
 	//std::cout << "CTrack::Update: dataCorrect = " << dataCorrect << ", m_predictionRect: " << m_predictionRect.center << ", " << m_predictionRect.angle << ", " << m_predictionRect.size << std::endl;
 
@@ -302,17 +302,23 @@ void CTrack::Update(const CRegion& region,
         //std::cout << m_lastRegion.m_brect << " - " << region.m_brect << std::endl;
 
         m_lastRegion = region;
-        m_trace.push_back(m_predictionPoint, region.m_rrect.center);
+        m_trace.push_back(m_predictionPoint, region.m_rrect.center, currTime);
 
-        CheckStatic(trajLen, currFrame, region, maxSpeedForStatic);
+        CheckStatic(trajLen, currFrame, region, maxSpeedForStatic, currTime);
     }
     else
     {
-        m_trace.push_back(m_predictionPoint);
+        m_trace.push_back(m_predictionPoint, currTime);
     }
 
-    if (m_trace.size() > max_trace_length)
-        m_trace.pop_front(m_trace.size() - max_trace_length);
+    for (;;)
+    {
+        std::chrono::duration<double> period = currTime - m_trace.at(0).m_frameTime;
+        if (period.count() > maxTraceLength)
+            m_trace.pop_front(1);
+        else
+            break;
+    }
 }
 
 ///
@@ -320,7 +326,7 @@ void CTrack::Update(const CRegion& region,
 /// \param region
 /// \param regionEmbedding
 /// \param dataCorrect
-/// \param max_trace_length
+/// \param maxTraceLength
 /// \param prevFrame
 /// \param currFrame
 /// \param trajLen
@@ -328,10 +334,11 @@ void CTrack::Update(const CRegion& region,
 void CTrack::Update(const CRegion& region,
                     const RegionEmbedding& regionEmbedding,
                     bool dataCorrect,
-                    size_t max_trace_length,
+                    double maxTraceLength,
                     cv::UMat prevFrame,
                     cv::UMat currFrame,
-                    int trajLen, int maxSpeedForStatic)
+                    int trajLen, int maxSpeedForStatic,
+                    time_point_t currTime)
 {
     m_regionEmbedding = regionEmbedding;
 
@@ -353,17 +360,23 @@ void CTrack::Update(const CRegion& region,
         //std::cout << m_lastRegion.m_brect << " - " << region.m_brect << std::endl;
 
         m_lastRegion = region;
-        m_trace.push_back(m_predictionPoint, m_lastRegion.m_rrect.center);
+        m_trace.push_back(m_predictionPoint, m_lastRegion.m_rrect.center, currTime);
 
-        CheckStatic(trajLen, currFrame, region, maxSpeedForStatic);
+        CheckStatic(trajLen, currFrame, region, maxSpeedForStatic, currTime);
     }
     else
     {
-        m_trace.push_back(m_predictionPoint);
+        m_trace.push_back(m_predictionPoint, currTime);
     }
 
-    if (m_trace.size() > max_trace_length)
-        m_trace.pop_front(m_trace.size() - max_trace_length);
+    for (;;)
+    {
+        std::chrono::duration<double> period = currTime - m_trace.at(0).m_frameTime;
+        if (period.count() > maxTraceLength)
+            m_trace.pop_front(1);
+        else
+            break;
+    }
 }
 
 ///
@@ -380,9 +393,17 @@ bool CTrack::IsStatic() const
 /// \param framesTime
 /// \return
 ///
-bool CTrack::IsStaticTimeout(int framesTime) const
+bool CTrack::IsStaticTimeout(time_point_t currTime, double staticPeriod) const
 {
-    return (m_staticFrames > framesTime);
+    if (m_isStatic)
+    {
+        std::chrono::duration<double> period = currTime - m_staticStartTime;
+        return period.count() > staticPeriod;
+    }
+    else
+    {
+        return false;
+    }
 }
 
 ///
@@ -472,12 +493,12 @@ track_t CTrack::HeightDist(const CRegion& reg) const
 /// \param trajLen
 /// \return
 ///
-bool CTrack::CheckStatic(int trajLen, cv::UMat currFrame, const CRegion& region, int maxSpeedForStatic)
+bool CTrack::CheckStatic(int trajLen, cv::UMat currFrame, const CRegion& region, int maxSpeedForStatic, time_point_t currTime)
 {
     if (!trajLen || static_cast<int>(m_trace.size()) < trajLen)
     {
         m_isStatic = false;
-        m_staticFrames = 0;
+        m_staticStartTime = currTime;
         m_staticFrame = cv::UMat();
     }
     else
@@ -486,7 +507,8 @@ bool CTrack::CheckStatic(int trajLen, cv::UMat currFrame, const CRegion& region,
         track_t speed = sqrt(sqr(velocity[0]) + sqr(velocity[1]));
         
         bool inCenter = true;
-        cv::Rect centerROI(m_trace[m_trace.size() - trajLen].x - region.m_brect.width / 2, m_trace[m_trace.size() - trajLen].y - region.m_brect.height / 2, region.m_brect.width, region.m_brect.height);
+        cv::Rect centerROI(cvRound(m_trace[m_trace.size() - trajLen].x) - region.m_brect.width / 2,
+                           cvRound(m_trace[m_trace.size() - trajLen].y) - region.m_brect.height / 2, region.m_brect.width, region.m_brect.height);
         for (size_t i = m_trace.size() - trajLen; i < m_trace.size() - 1; ++i)
         {
             if (!centerROI.contains(m_trace[i]))
@@ -525,13 +547,12 @@ bool CTrack::CheckStatic(int trajLen, cv::UMat currFrame, const CRegion& region,
 #endif
             }
 
-            ++m_staticFrames;
             m_isStatic = true;
         }
         else
         {
             m_isStatic = false;
-            m_staticFrames = 0;
+            m_staticStartTime = currTime;
             m_staticFrame = cv::UMat();
         }
     }
@@ -572,9 +593,10 @@ objtype_t CTrack::GetCurrType() const
 /// \brief CTrack::ConstructObject
 /// \return
 ///
-TrackingObject CTrack::ConstructObject() const
+TrackingObject CTrack::ConstructObject(time_point_t frameTime) const
 {
-    return TrackingObject(GetLastRect(), m_trackID, m_trace, IsStatic(), m_staticFrames, IsOutOfTheFrame(),
+    std::chrono::duration<double> period = frameTime - m_staticStartTime;
+    return TrackingObject(GetLastRect(), m_trackID, m_trace, IsStatic(), cvRound(period.count()), IsOutOfTheFrame(),
                           m_currType, m_lastRegion.m_confidence, m_kalman.GetVelocity());
 }
 
@@ -585,6 +607,25 @@ TrackingObject CTrack::ConstructObject() const
 track_id_t CTrack::GetID() const
 {
     return m_trackID;
+}
+
+///
+/// \brief CTrack::GetLostPeriod
+/// \return
+///
+double CTrack::GetLostPeriod(time_point_t currTime) const
+{
+    std::chrono::duration<double> period = currTime - m_lastDetectionTime;
+    return period.count();
+}
+
+///
+/// \brief CTrack::ResetLostTime
+/// \return
+///
+void CTrack::ResetLostTime(time_point_t currTime)
+{
+    m_lastDetectionTime = currTime;
 }
 
 ///
@@ -612,24 +653,6 @@ void CTrack::KalmanPredictRect()
 void CTrack::KalmanPredictPoint()
 {
     m_kalman.GetPointPrediction();
-}
-
-///
-/// \brief CTrack::SkippedFrames
-/// \return
-///
-size_t CTrack::SkippedFrames() const
-{
-    return m_skippedFrames;
-}
-
-///
-/// \brief CTrack::SkippedFrames
-/// \return
-///
-size_t& CTrack::SkippedFrames()
-{
-    return m_skippedFrames;
 }
 
 ///
@@ -698,10 +721,6 @@ void CTrack::RectUpdate(const CRegion& region,
             break;
 
         case tracking::TrackKCF:
-        case tracking::TrackMIL:
-        case tracking::TrackMedianFlow:
-        case tracking::TrackGOTURN:
-        case tracking::TrackMOSSE:
         case tracking::TrackCSRT:
         case tracking::TrackDaSiamRPN:
         case tracking::TrackNano:
@@ -757,111 +776,42 @@ void CTrack::RectUpdate(const CRegion& region,
             std::cerr << "KCF tracker was disabled in CMAKE! Set lostTrackType = TrackNone in constructor." << std::endl;
 #endif
             break;
-
-        case tracking::TrackDAT:
-        case tracking::TrackSTAPLE:
-        case tracking::TrackLDES:
-            {
-                if (!m_VOTTracker || reinit)
-                {
-                    CreateExternalTracker(currFrame.channels());
-
-                    cv::Rect2d lastRect(brect.x, brect.y, brect.width, brect.height);
-
-                    if (lastRect.x >= 0 &&
-                            lastRect.y >= 0 &&
-                            lastRect.x + lastRect.width < prevFrame.cols &&
-                            lastRect.y + lastRect.height < prevFrame.rows &&
-                            lastRect.area() > 0)
-                    {
-                        cv::Mat mat = currFrame.getMat(cv::ACCESS_READ);
-                        m_VOTTracker->Initialize(mat, lastRect);
-                        m_VOTTracker->Train(mat, true);
-
-                        inited = true;
-                        m_outOfTheFrame = false;
-                    }
-                    else
-                    {
-                        m_VOTTracker = nullptr;
-                        m_outOfTheFrame = true;
-                    }
-                }
-            }
-            break;
         }
         return inited;
     };
 
-    switch (m_externalTrackerForLost)
-    {
-    case tracking::TrackNone:
-        break;
-
-    case tracking::TrackKCF:
-    case tracking::TrackMIL:
-    case tracking::TrackMedianFlow:
-    case tracking::TrackGOTURN:
-    case tracking::TrackMOSSE:
-	case tracking::TrackCSRT:
-    case tracking::TrackDaSiamRPN:
-    case tracking::TrackNano:
-    case tracking::TrackVit:
+	if (m_externalTrackerForLost != tracking::TrackNone)
+	{
 #ifdef USE_OCV_KCF
-        {
-            cv::Rect roiRect;
-            bool inited = InitTracker(roiRect, false);
+		cv::Rect roiRect;
+		bool inited = InitTracker(roiRect, false);
 #if (((CV_VERSION_MAJOR == 4) && (CV_VERSION_MINOR < 5)) || ((CV_VERSION_MAJOR == 4) && (CV_VERSION_MINOR == 5) && (CV_VERSION_REVISION < 1)) || (CV_VERSION_MAJOR == 3))
-            cv::Rect2d newRect;
+		cv::Rect2d newRect;
 #else
-            cv::Rect newRect;
+		cv::Rect newRect;
 #endif
-            if (!inited && !m_tracker.empty() && m_tracker->update(cv::UMat(currFrame, roiRect), newRect))
-            {
+		if (!inited && !m_tracker.empty() && m_tracker->update(cv::UMat(currFrame, roiRect), newRect))
+		{
 #if 0
 #ifndef SILENT_WORK
-                cv::Mat tmp2 = cv::UMat(currFrame, roiRect).getMat(cv::ACCESS_READ).clone();
-                cv::rectangle(tmp2, newRect, cv::Scalar(255, 255, 255), 2);
-                cv::imshow("track " + std::to_string(m_trackID), tmp2);
+			cv::Mat tmp2 = cv::UMat(currFrame, roiRect).getMat(cv::ACCESS_READ).clone();
+			cv::rectangle(tmp2, newRect, cv::Scalar(255, 255, 255), 2);
+			cv::imshow("track " + std::to_string(m_trackID), tmp2);
 #endif
 #endif
 
 #if (((CV_VERSION_MAJOR == 4) && (CV_VERSION_MINOR < 5)) || ((CV_VERSION_MAJOR == 4) && (CV_VERSION_MINOR == 5) && (CV_VERSION_REVISION < 1)) || (CV_VERSION_MAJOR == 3))
-                cv::Rect prect(cvRound(newRect.x) + roiRect.x, cvRound(newRect.y) + roiRect.y, cvRound(newRect.width), cvRound(newRect.height));
+			cv::Rect prect(cvRound(newRect.x) + roiRect.x, cvRound(newRect.y) + roiRect.y, cvRound(newRect.width), cvRound(newRect.height));
 #else
-                cv::Rect prect(newRect.x + roiRect.x, newRect.y + roiRect.y, newRect.width, newRect.height);
+			cv::Rect prect(newRect.x + roiRect.x, newRect.y + roiRect.y, newRect.width, newRect.height);
 #endif
-                //trackedRRect = cv::RotatedRect(prect.tl(), cv::Point2f(static_cast<float>(prect.x + prect.width), static_cast<float>(prect.y)), prect.br());
-                trackedRRect = cv::RotatedRect(cv::Point2f(prect.x + prect.width / 2.f, prect.y + prect.height / 2.f), cv::Size2f(static_cast<float>(prect.width), static_cast<float>(prect.height)), 0);
-                wasTracked = true;
-            }
-        }
+			trackedRRect = cv::RotatedRect(cv::Point2f(prect.x + prect.width / 2.f, prect.y + prect.height / 2.f), cv::Size2f(static_cast<float>(prect.width), static_cast<float>(prect.height)), 0);
+			wasTracked = true;
+		}
 #else
-        std::cerr << "KCF tracker was disabled in CMAKE! Set lostTrackType = TrackNone in constructor." << std::endl;
+		std::cerr << "KCF tracker was disabled in CMAKE! Set lostTrackType = TrackNone in constructor." << std::endl;
 #endif
-        break;
-
-    case tracking::TrackDAT:
-    case tracking::TrackSTAPLE:
-    case tracking::TrackLDES:
-        {
-            cv::Rect roiRect;
-            bool inited = InitTracker(roiRect, false);
-            if (!inited && m_VOTTracker)
-            {
-                constexpr float confThresh = 0.3f;
-                cv::Mat mat = currFrame.getMat(cv::ACCESS_READ);
-                float confidence = 0;
-                trackedRRect = m_VOTTracker->Update(mat, confidence);
-                if (confidence > confThresh)
-                {
-                    m_VOTTracker->Train(mat, false);
-                    wasTracked = true;
-                }
-            }
-        }
-        break;
-    }
+	}
 
     cv::Rect brect = m_predictionRect.boundingRect();
 
@@ -971,9 +921,6 @@ void CTrack::CreateExternalTracker(int channels)
     switch (m_externalTrackerForLost)
     {
     case tracking::TrackNone:
-        if (m_VOTTracker)
-            m_VOTTracker = nullptr;
-
 #ifdef USE_OCV_KCF
         if (m_tracker && !m_tracker.empty())
             m_tracker.release();
@@ -1006,84 +953,6 @@ void CTrack::CreateExternalTracker(int channels)
 #endif
         }
 #endif
-        if (m_VOTTracker)
-            m_VOTTracker = nullptr;
-        break;
-
-    case tracking::TrackMIL:
-#ifdef USE_OCV_KCF
-        if (!m_tracker || m_tracker.empty())
-        {
-            cv::TrackerMIL::Params params;
-
-#if (((CV_VERSION_MAJOR == 3) && (CV_VERSION_MINOR >= 3)) || (CV_VERSION_MAJOR > 3))
-            m_tracker = cv::TrackerMIL::create(params);
-#else
-            m_tracker = cv::TrackerMIL::createTracker(params);
-#endif
-        }
-#endif
-        if (m_VOTTracker)
-            m_VOTTracker = nullptr;
-        break;
-
-    case tracking::TrackMedianFlow:
-#ifdef USE_OCV_KCF
-        if (!m_tracker || m_tracker.empty())
-        {
-#if (((CV_VERSION_MAJOR == 4) && (CV_VERSION_MINOR > 4)) || (CV_VERSION_MAJOR > 4))
-            std::cerr << "TrackMedianFlow not supported in OpenCV 4.5 and newer!" << std::endl;
-            CV_Assert(0);
-#else
-            cv::TrackerMedianFlow::Params params;
-
-#if (((CV_VERSION_MAJOR == 3) && (CV_VERSION_MINOR >= 3)) || (CV_VERSION_MAJOR > 3))
-            m_tracker = cv::TrackerMedianFlow::create(params);
-#else
-            m_tracker = cv::TrackerMedianFlow::createTracker(params);
-#endif
-#endif
-        }
-#endif
-        if (m_VOTTracker)
-            m_VOTTracker = nullptr;
-        break;
-
-    case tracking::TrackGOTURN:
-#ifdef USE_OCV_KCF
-        if (!m_tracker || m_tracker.empty())
-        {
-            cv::TrackerGOTURN::Params params;
-
-#if (((CV_VERSION_MAJOR == 3) && (CV_VERSION_MINOR >= 3)) || (CV_VERSION_MAJOR > 3))
-            m_tracker = cv::TrackerGOTURN::create(params);
-#else
-            m_tracker = cv::TrackerGOTURN::createTracker(params);
-#endif
-        }
-#endif
-        if (m_VOTTracker)
-            m_VOTTracker = nullptr;
-        break;
-
-    case tracking::TrackMOSSE:
-#ifdef USE_OCV_KCF
-        if (!m_tracker || m_tracker.empty())
-        {
-#if (((CV_VERSION_MAJOR == 4) && (CV_VERSION_MINOR > 4)) || (CV_VERSION_MAJOR > 4))
-            std::cerr << "TrackMOSSE not supported in OpenCV 4.5 and newer!" << std::endl;
-            CV_Assert(0);
-#else
-#if (((CV_VERSION_MAJOR == 3) && (CV_VERSION_MINOR > 3)) || (CV_VERSION_MAJOR > 3))
-            m_tracker = cv::TrackerMOSSE::create();
-#else
-            m_tracker = cv::TrackerMOSSE::createTracker();
-#endif
-#endif
-        }
-#endif
-        if (m_VOTTracker)
-            m_VOTTracker = nullptr;
         break;
 
 	case tracking::TrackCSRT:
@@ -1107,8 +976,6 @@ void CTrack::CreateExternalTracker(int channels)
 #endif
 		}
 #endif
-        if (m_VOTTracker)
-            m_VOTTracker = nullptr;
 		break;
         
     case tracking::TrackDaSiamRPN:
@@ -1141,8 +1008,6 @@ void CTrack::CreateExternalTracker(int channels)
 #endif
 		}
 #endif
-        if (m_VOTTracker)
-            m_VOTTracker = nullptr;
 		break;
 
     case tracking::TrackNano:
@@ -1174,8 +1039,6 @@ void CTrack::CreateExternalTracker(int channels)
 #endif
         }
 #endif
-        if (m_VOTTracker)
-            m_VOTTracker = nullptr;
         break;
 
     case tracking::TrackVit:
@@ -1206,45 +1069,7 @@ void CTrack::CreateExternalTracker(int channels)
 #endif
         }
 #endif
-        if (m_VOTTracker)
-            m_VOTTracker = nullptr;
         break;
-
-    case tracking::TrackDAT:
-#ifdef USE_OCV_KCF
-		if (m_tracker && !m_tracker.empty())
-			m_tracker.release();
-#endif
-        if (!m_VOTTracker)
-            m_VOTTracker = std::make_unique<DAT_TRACKER>();
-        break;
-
-    case tracking::TrackSTAPLE:
-#ifdef USE_OCV_KCF
-        if (m_tracker && !m_tracker.empty())
-            m_tracker.release();
-#endif
-#ifdef USE_STAPLE_TRACKER
-        if (!m_VOTTracker)
-            m_VOTTracker = std::make_unique<STAPLE_TRACKER>();
-#else
-		std::cerr << "Project was compiled without STAPLE tracking!" << std::endl;
-#endif
-        break;
-#if 1
-	case tracking::TrackLDES:
-#ifdef USE_OCV_KCF
-		if (m_tracker && !m_tracker.empty())
-			m_tracker.release();
-#endif
-#ifdef USE_STAPLE_TRACKER
-		if (!m_VOTTracker)
-			m_VOTTracker = std::make_unique<LDESTracker>();
-#else
-		std::cerr << "Project was compiled without STAPLE tracking!" << std::endl;
-#endif
-		break;
-#endif
     }
 }
 
